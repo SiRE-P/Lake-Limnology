@@ -33,7 +33,7 @@ get_seasons <- function(x) {
 }
 
 
-# Load 2020 - present data ------------------------------------------------
+# Load 2021 - present data ------------------------------------------------
 
 
 # Zooplankton data
@@ -93,6 +93,7 @@ new_ppl <- read_xlsx(
   rename_with(~tolower(gsub("\\s\\(.*\\)", "", .x))) |>   # Remove units from column names
   mutate(
     across(`unit density`:last_col(), as.numeric),
+    # Re-classify edibility according to rules stated in Hyatt et al. 2016
     edibility = if_else(
       grepl("(M|m)icrocystis", taxon) |
         !is.na(`mean biomass- incl. mucilage`) |
@@ -104,12 +105,11 @@ new_ppl <- read_xlsx(
     depth = if_else(grepl("1$", `client sample id`), 
                     "1, 3, 5 m", 
                     "20 m"),
-    station = unlist(strsplit(`client sample id`, "-"))[2] %>%
-      substr(., 2, 2),
-    expansion = `sub-sample volume` / max(`sub-sample volume`)
+    station = str_extract(`client sample id`, "(?<=GCL-S)\\d{1}"),
+    expansion = `sub-sample volume` / max(`sub-sample volume`),
+    adj_biomass = `total biomass`/expansion
   ) |> 
-  get_seasons() |> 
-  mutate(season = if_else(year == 2021 & season == "Winter", "Fall", season))
+  get_seasons() 
 
 
 # Chemistry data
@@ -230,8 +230,8 @@ hist_zpl <- bind_rows(zpl_2008_2012, zpl_2013) |>
     across(Biomass:Density, \(x) sum(x, na.rm = TRUE))
   ) |> 
   mutate(
-    d_n = if_else(Depth == 25, "Night", "Day"), # Day vs. night samples
     Depth = if_else(is.na(Depth), 50, Depth),
+    d_n = if_else(Depth == 25, "Night", "Day"), # Day vs. night samples
     Station = if_else(is.na(Station), "1, 2, 3, 4", Station),
     # Wet weights were used prior to 2012. Hyatt et al. (2013) 
     # use a conversion factor of 7 to compare.
@@ -276,7 +276,8 @@ hist_ppl <- map(
     depth = case_when(
       is.na(depth) | grepl("(\\d,)+", depth) ~ "1, 3, 5 m",
       .default = paste(depth, "m")
-    )
+    ),
+    station = "3, 4" # As reported in Hyatt et al. 2016
   ) |> 
   get_seasons()
 
@@ -304,7 +305,9 @@ hist_chem <- map(
     names_to = "compound",
     values_to = "measurement",
     values_transform = as.numeric
-  )
+  ) |> 
+  mutate(station = "3, 4") # As reported in Hyatt et al. 2016
+  # Note that values are averaged over stations 3 & 4, not summed
 
 
 # Collate historic and recent data ----------------------------------------
@@ -322,13 +325,9 @@ zpl <- new_zpl |>
 
 # Join the new phytoplankton data with the historical data
 ppl <- new_ppl |> 
-  mutate(
-    #`total biomass` = `total biomass` + `total biomass- incl. mucilage`,
-    adj_ttl_biomass = (`total biomass` / expansion)
-  ) |> 
   summarize(
-    .by = c(phylum, date, depth, year, month, season, edibility),
-    biomass = sum(adj_ttl_biomass, na.rm = TRUE)
+    .by = c(phylum, date, depth, year, month, season, station, edibility),
+    biomass = sum(adj_biomass, na.rm = TRUE)
   ) |> 
   mutate(
     lake = "GCL",
@@ -349,7 +348,8 @@ chem <- new_chem |>
       "1, 3, 5" = c("1", "3", "5"),
       "20" = "20"
     ),
-    across(nitrate:tp, as.numeric)
+    across(nitrate:tp, as.numeric),
+    station = as.character(station)
   ) |>
   summarize(
     .by = c(date, station, depth, season, year, month),
@@ -483,13 +483,17 @@ zpl_plot_data <- zpl |>
 
 # Phytoplankton data time series
 ppl_plot_data <- ppl |> 
-  filter(!edibility == "total") |> 
-  mutate(
-    depth = fct_collapse(depth, "c. 20 m" = c("20 m", "25 m"))) |> 
+  filter(
+    !str_detect(station, "1|2"), # Historic data are only from stations 3 & 4
+    !edibility == "total"
+  ) |> 
+  mutate(depth = fct_collapse(as.factor(depth), "c. 20 m" = c("20 m", "25 m"))) |> 
+  # Sum biomass across stations for each survey
   summarize(
     .by = c(date, depth, edibility, taxon, year, season),
     biomass = sum(biomass, na.rm = TRUE)
   ) |> 
+  # Average biomass across surveys for each season
   summarize(
     .by = c(depth, edibility, taxon, year, season),
     biomass = mean(biomass, na.rm = TRUE)
@@ -522,20 +526,24 @@ ppl_plot_data <- ppl |>
     ) +
     scale_fill_manual(values = season_cols) +
     scale_x_continuous(breaks = seq.int(min(ppl$year), max(ppl$year))) +
-    coord_cartesian(expand = FALSE) +
+    scale_y_continuous(
+      expand = expansion(mult = c(0, 0.05)),
+      labels = scales::label_number()
+    ) +
     labs(y = "Phytoplankton biomass (µg/L)", fill = "Season") + 
     theme(
-      strip.placement = "outside",
       axis.text.x = element_text(angle = 45, hjust = 1),
       legend.position = c(0.3, 0.05),
       legend.justification = c(1, 0),
-      legend.background = element_rect(colour = "black")
+      legend.background = element_rect(colour = "black"),
+      panel.spacing.y = unit(1, "lines")
     )
 )
 
 
 # Chemistry data time series
 chem_plot_data <- chem |> 
+  filter(!str_detect(station, "1|2")) |> # Historic data are only from stations 3 & 4
   mutate(depth = fct_collapse(
     depth, 
     "c. 20 m" = c("20", "25"),
@@ -570,7 +578,7 @@ chem_plot_data <- chem |>
           chlorophyll = "Chlorophyll-a (µg/L)",
           nitrate = "Nitrate (mg/L)",
           nitrite = "Nitrite (mg/L)",
-          tp = "Total phosphorus (mg/L)"
+          tp = "Phosphorus (mg/L)"
         )
       )
     ) +
@@ -608,6 +616,7 @@ if(FALSE) { # Toggle "TRUE" to run
           paste0("GCL_limno_", name, "_time-series.png")
         ),
         width = 9,
+        height = 7,
         units = "in",
         dpi = "print"
       )
