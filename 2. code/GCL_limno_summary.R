@@ -33,7 +33,7 @@ get_seasons <- function(x) {
 }
 
 
-# Load 2021 - present data ------------------------------------------------
+# Load 2020 - present data ------------------------------------------------
 
 
 # Zooplankton data
@@ -122,6 +122,18 @@ new_chem <- read_xlsx(
   sheet = "CHEM"
 ) |> 
   rename_with(~ tolower(str_extract(.x, "^\\w*\\b"))) |> 
+  # Convert Nitrate, Nitrite, and Total Phosphorus from mg to µg
+  # (Chlorophyll-a) is already in µg
+  mutate(
+    across(
+      c(nitrate, nitrite, tp),
+      \(x) if_else(
+        str_detect(x, "<"),
+        paste0("<", as.numeric(str_remove(x, "<"))*1000),
+        as.character(as.numeric(x)*1000)
+      )
+    )
+  ) |> 
   get_seasons()
 
 
@@ -364,12 +376,6 @@ chem <- new_chem |>
   mutate(
     measurement = if_else(is.nan(measurement), NA_real_, measurement),
     year = as.numeric(year),
-    # Convert mg to ug
-    measurement = if_else(
-      year > 2020 & compound != "chlorophyll",
-      measurement * 1000,
-      measurement
-    ),
     season = factor(season, levels = c("Spring", "Summer", "Fall", "Winter"))
   )
 
